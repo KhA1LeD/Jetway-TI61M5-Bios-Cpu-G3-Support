@@ -1,0 +1,96 @@
+name: BIOS - Gen3 (Ivy Bridge) microcode
+
+on:
+  workflow_dispatch:
+    inputs:
+      bios_file:
+        description: "BIOS dump to process"
+        default: "Jetway TI61M5.bin"
+        required: true
+      models:
+        description: "CPU models to refresh (hex, comma separated). 3a = Ivy Bridge (gen 3), 2a = Sandy Bridge (gen 2)"
+        default: "3a"
+        required: true
+  push:
+    branches: [add-gen3-ucode-action]
+    paths:
+      - "tools/**"
+      - ".github/workflows/bios-gen3-ucode.yml"
+
+permissions:
+  contents: read
+
+env:
+  BIOS_FILE: ${{ inputs.bios_file || 'Jetway TI61M5.bin' }}
+  MODELS: ${{ inputs.models || '3a' }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Self-test the patch tool
+        run: python3 -I tools/bios_ucode.py selftest "$BIOS_FILE"
+
+      - name: Audit original image
+        run: |
+          mkdir -p out
+          python3 -I tools/bios_ucode.py audit "$BIOS_FILE" | tee out/audit-before.txt
+
+      - name: Download latest Intel microcode release
+        run: |
+          mkdir -p ucode-src
+          gh release download --repo intel/Intel-Linux-Processor-Microcode-Data-Files \
+            --pattern 'microcode-*.tar.gz' --dir ucode-src
+          tar -xzf ucode-src/microcode-*.tar.gz -C ucode-src
+          D="$(find ucode-src -type d -name intel-ucode | head -1)"
+          test -n "$D" || { echo "intel-ucode directory not found"; exit 1; }
+          ls "$D" | head -50
+          echo "UCODE_DIR=$PWD/$D" >> "$GITHUB_ENV"
+
+      - name: Patch microcode (in place, same size)
+        run: |
+          python3 -I tools/bios_ucode.py patch "$BIOS_FILE" \
+            --ucode-dir "$UCODE_DIR" --models "$MODELS" \
+            -o "out/$(basename "$BIOS_FILE" .bin)-gen3.bin" | tee out/patch.log
+
+      - name: Audit and verify patched image
+        run: |
+          P="out/$(basename "$BIOS_FILE" .bin)-gen3.bin"
+          python3 -I tools/bios_ucode.py audit "$P" | tee out/audit-after.txt
+          python3 -I tools/bios_ucode.py verify "$BIOS_FILE" "$P" | tee out/verify.txt
+
+      # Cross-check with UEFIExtract (UEFITool). Best effort: the python verify above is the gate.
+      - name: Cross-check with UEFIExtract
+        continue-on-error: true
+        run: |
+          mkdir -p uefitool && cd uefitool
+          gh release download --repo LongSoft/UEFITool --pattern '*UEFIExtract*linux*' --dir .
+          unzip -o ./*UEFIExtract*linux*.zip
+          chmod +x UEFIExtract
+          P="../out/$(basename "$BIOS_FILE" .bin)-gen3.bin"
+          cp "../$BIOS_FILE" orig.bin
+          cp "$P" patched.bin
+          ./UEFIExtract orig.bin all > ../out/uefiextract-orig.log 2>&1
+          ./UEFIExtract patched.bin all > ../out/uefiextract-patched.log 2>&1
+          # microcode FFS bodies of both images, side by side
+          for t in orig patched; do
+            find "$t.bin.dump" -path '*17088572-377F-44EF-8F4E-B09FFF46A070*' -name body.bin -exec sha256sum {} \; \
+              | sed "s#$t.bin.dump#$t#" | tee ../out/ucode-bodies-$t.txt
+          done
+
+      - name: Checksums
+        run: |
+          cd out && sha256sum *.bin | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gen3-bios
+          path: out/
+          if-no-files-found: error
