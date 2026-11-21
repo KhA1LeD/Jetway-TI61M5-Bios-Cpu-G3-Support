@@ -28,6 +28,9 @@ env:
 jobs:
   patch:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash  # -eo pipefail, so errors are not hidden by '| tee'
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +64,7 @@ jobs:
         run: |
           python3 -I tools/bios_ucode.py patch "$BIOS_FILE" \
             --ucode-dir "$UCODE_DIR" --models "$MODELS" \
+            --drop-engineering-samples \
             -o "out/$(basename "$BIOS_FILE" .bin)-gen3.bin" | tee out/patch.log
 
       - name: Audit and verify patched image

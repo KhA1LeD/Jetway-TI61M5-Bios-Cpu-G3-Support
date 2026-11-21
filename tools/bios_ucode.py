@@ -179,14 +179,17 @@ def lzma_pack(data, like, limit):
     props, dictsz, _ = struct.unpack_from("<BIQ", like, 0)
     lc, lp, pb = props % 9, (props // 9) % 5, props // 45
     best = None
-    for nice in (273, 128, 64, 32):
-        for mf in (lzma.MF_BT4, lzma.MF_BT2, lzma.MF_BT3):
-            for preset in (9 | lzma.PRESET_EXTREME, 9):
-                flt = [{"id": lzma.FILTER_LZMA1, "preset": preset, "dict_size": dictsz, "lc": lc,
-                        "lp": lp, "pb": pb, "nice_len": nice, "mf": mf, "mode": lzma.MODE_NORMAL}]
-                raw = lzma.compress(data, format=lzma.FORMAT_RAW, filters=flt)
-                if best is None or len(raw) < len(best):
-                    best = raw
+    # settings ordered by how well they compressed the original volume (best first); stop at first fit
+    combos = ((273, lzma.MF_BT2, 9 | lzma.PRESET_EXTREME), (273, lzma.MF_BT4, 9), (128, lzma.MF_BT2, 9 | lzma.PRESET_EXTREME),
+              (128, lzma.MF_BT3, 9), (273, lzma.MF_BT3, 9 | lzma.PRESET_EXTREME), (64, lzma.MF_BT4, 9 | lzma.PRESET_EXTREME))
+    for nice, mf, preset in combos:
+        flt = [{"id": lzma.FILTER_LZMA1, "preset": preset, "dict_size": dictsz, "lc": lc,
+                "lp": lp, "pb": pb, "nice_len": nice, "mf": mf, "mode": lzma.MODE_NORMAL}]
+        raw = lzma.compress(data, format=lzma.FORMAT_RAW, filters=flt)
+        if best is None or len(raw) < len(best):
+            best = raw
+        if 13 + len(best) <= limit:
+            break
     blob = struct.pack("<BIQ", props, dictsz, len(data)) + best
     if len(blob) > limit:
         raise ToolError("recompressed section is %d bytes, slot only holds %d" % (len(blob), limit))
@@ -311,7 +314,7 @@ def cmd_audit(buf, out=print):
 ES_DROP_ORDER = (0x306A2, 0x306A4, 0x306A5, 0x306A6, 0x306A8)  # pre-production Ivy Bridge steppings
 
 
-def cmd_patch(buf, ucode_dir, models, allow_downgrade=False, drop_es=False):
+def cmd_patch(buf, ucode_dir, models, allow_downgrade=False, drop_n=0):
     cands = load_candidates(ucode_dir)
     print("candidate microcode patches loaded: %d" % len(cands))
     rep = Report()
@@ -343,14 +346,10 @@ def cmd_patch(buf, ucode_dir, models, allow_downgrade=False, drop_es=False):
 
         ents, msgs, skipped = plan(True)
         dropped = []
-        if sum(len(e[2]) for e in ents) > cap and drop_es:
-            for sig in ES_DROP_ORDER:
-                if sum(len(e[2]) for e in ents) <= cap:
-                    break
-                victims = [e for e in ents if e[0].sig == sig and not e[3]]
-                for e in victims:
-                    ents.remove(e)
-                    dropped.append("%s dropped engineering-sample patch %s" % (loc, e[0].label()))
+        for sig in ES_DROP_ORDER[:drop_n]:
+            for e in [e for e in ents if e[0].sig == sig and not e[3]]:
+                ents.remove(e)
+                dropped.append("%s dropped engineering-sample patch %s" % (loc, e[0].label()))
         if sum(len(e[2]) for e in ents) > cap:
             ents, msgs, skipped = plan(False)  # fall back to same-size replacements only
             dropped = []
@@ -369,6 +368,29 @@ def cmd_patch(buf, ucode_dir, models, allow_downgrade=False, drop_es=False):
     if not changed:
         print("nothing to change")
     return changed
+
+
+def patch_with_room(buf, ucode_dir, models, drop_es=False):
+    """cmd_patch, retrying with progressively more engineering-sample patches dropped if the
+    recompressed LZMA section no longer fits its slot. Result is written back into `buf`."""
+    import contextlib
+    import io
+    orig = bytes(buf)
+    for n in range(0, (len(ES_DROP_ORDER) + 1) if drop_es else 1):
+        trial = bytearray(orig)
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink if n < len(ES_DROP_ORDER) else sys.stdout):
+                changed = cmd_patch(trial, ucode_dir, models, drop_n=n)
+        except ToolError as e:
+            if "slot only holds" in str(e) and drop_es and n < len(ES_DROP_ORDER):
+                print("compressed volume too large with %d engineering-sample patch(es) dropped, retrying" % n)
+                continue
+            raise
+        print(sink.getvalue(), end="")
+        buf[:] = trial
+        return changed
+    raise ToolError("could not make the patched volume fit")
 
 
 def cmd_verify(orig, new):
@@ -458,7 +480,7 @@ def cmd_selftest(buf):
     with tempfile.TemporaryDirectory() as td:
         open(os.path.join(td, "06-3a-09"), "wb").write(big)
         new = bytearray(buf)
-        if not cmd_patch(new, td, {IVB_MODEL}):
+        if not patch_with_room(new, td, {IVB_MODEL}):
             raise ToolError("selftest: larger patch not applied")
         if not cmd_verify(bytes(buf), bytes(new)):
             raise ToolError("selftest: verify failed (larger patch)")
@@ -468,6 +490,31 @@ def cmd_selftest(buf):
             got = {x.sig: x for x in ucs}
             assert got[0x306A9].rev == u.rev + 8 and got[0x306A9].tsz == len(big), loc
             assert len(got) == 8, "no patch may be lost: " + loc
+    # scenario 3: incompressible larger patch -> compressed volume overflows, needs dropped ES patch
+    import random
+    rnd = random.Random(1)
+    big = bytearray(blob[:48]) + bytearray(rnd.randrange(256) for _ in range(u.tsz + 0x800 - 48))
+    struct.pack_into("<I", big, 4, u.rev + 8)
+    struct.pack_into("<I", big, 28, len(big) - 48)
+    struct.pack_into("<I", big, 32, len(big))
+    struct.pack_into("<I", big, 16, 0)
+    struct.pack_into("<I", big, 16, (-sum(struct.unpack("<%dI" % (len(big) // 4), bytes(big)))) % (1 << 32))
+    with tempfile.TemporaryDirectory() as td:
+        open(os.path.join(td, "06-3a-09"), "wb").write(big)
+        try:
+            patch_with_room(bytearray(buf), td, {IVB_MODEL})
+            print("(incompressible patch fit without dropping anything)")
+        except ToolError as e:
+            assert "slot only holds" in str(e), e
+        new = bytearray(buf)
+        patch_with_room(new, td, {IVB_MODEL}, drop_es=True)
+        if not cmd_verify(bytes(buf), bytes(new)):
+            raise ToolError("selftest: verify failed (incompressible patch)")
+        rep4 = Report()
+        walk_image(bytearray(new), rep4)
+        for loc, ucs, body in rep4.copies:
+            got = {x.sig: x for x in ucs}
+            assert got[0x306A9].rev == u.rev + 8 and 0x206A7 in got and 0x206A6 in got, loc
     print("SELFTEST OK")
 
 
@@ -490,7 +537,7 @@ def main():
             orig = open(args.image, "rb").read()
             buf = bytearray(orig)
             models = {int(x, 16) for x in args.models.split(",")}
-            changed = cmd_patch(buf, args.ucode_dir, models, drop_es=args.drop_engineering_samples)
+            changed = patch_with_room(buf, args.ucode_dir, models, drop_es=args.drop_engineering_samples)
             open(args.output, "wb").write(buf)
             print("sha256 %s  %s" % (hashlib.sha256(buf).hexdigest(), args.output))
             if changed and not cmd_verify(orig, bytes(buf)):
