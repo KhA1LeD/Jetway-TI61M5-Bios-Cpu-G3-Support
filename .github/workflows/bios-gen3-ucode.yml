@@ -76,15 +76,16 @@ jobs:
           mkdir -p uefitool && cd uefitool
           gh release download --repo LongSoft/UEFITool --pattern '*UEFIExtract*linux*' --dir .
           unzip -o ./*UEFIExtract*linux*.zip
-          chmod +x UEFIExtract
+          UE="$(find . -maxdepth 1 -type f -iname uefiextract | head -1)"
+          chmod +x "$UE"
           P="../out/$(basename "$BIOS_FILE" .bin)-gen3.bin"
           cp "../$BIOS_FILE" orig.bin
           cp "$P" patched.bin
-          ./UEFIExtract orig.bin all > ../out/uefiextract-orig.log 2>&1
-          ./UEFIExtract patched.bin all > ../out/uefiextract-patched.log 2>&1
+          "$UE" orig.bin all > ../out/uefiextract-orig.log 2>&1
+          "$UE" patched.bin all > ../out/uefiextract-patched.log 2>&1
           # microcode FFS bodies of both images, side by side
           for t in orig patched; do
-            find "$t.bin.dump" -path '*17088572-377F-44EF-8F4E-B09FFF46A070*' -name body.bin -exec sha256sum {} \; \
+            find "$t.bin.dump" -ipath '*17088572-377F-44EF-8F4E-B09FFF46A070*' -name body.bin -exec sha256sum {} \; \
               | sed "s#$t.bin.dump#$t#" | tee ../out/ucode-bodies-$t.txt
           done
 
