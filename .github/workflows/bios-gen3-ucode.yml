@@ -46,9 +46,12 @@ jobs:
       - name: Download latest Intel microcode release
         run: |
           mkdir -p ucode-src
-          gh release download --repo intel/Intel-Linux-Processor-Microcode-Data-Files \
-            --pattern 'microcode-*.tar.gz' --dir ucode-src
-          tar -xzf ucode-src/microcode-*.tar.gz -C ucode-src
+          # The upstream releases have no custom assets, only the auto-generated source archive.
+          R=intel/Intel-Linux-Processor-Microcode-Data-Files
+          TAG="$(gh release view --repo "$R" --json tagName --jq .tagName)"
+          echo "Intel microcode release: $TAG"
+          gh release download "$TAG" --repo "$R" --archive tar.gz --dir ucode-src
+          tar -xzf ucode-src/*.tar.gz -C ucode-src
           D="$(find ucode-src -type d -name intel-ucode | head -1)"
           test -n "$D" || { echo "intel-ucode directory not found"; exit 1; }
           ls "$D" | head -50

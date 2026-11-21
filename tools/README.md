@@ -22,7 +22,7 @@ python3 tools/bios_ucode.py selftest "Jetway TI61M5.bin"
 
 1. اختبار ذاتي للأداة.
 2. فحص الملف قبل التعديل.
-3. تنزيل آخر إصدار رسمي من `intel/Intel-Linux-Processor-Microcode-Data-Files`.
+3. تنزيل أرشيف المصدر لآخر إصدار من `intel/Intel-Linux-Processor-Microcode-Data-Files` (الإصدارات لا تحمل ملفات مرفقة، فقط أرشيف الكود).
 4. استبدال microcode الجيل الثالث بإصدار أحدث **في نفس المكان وبنفس الحجم** في النسختين، مع إعادة ضغط LZMA وإصلاح checksums الـ FFS.
 5. فحص وتحقق بعد التعديل (`verify`)، ثم مقارنة إضافية بـ UEFIExtract (UEFITool) إن توفر.
 6. رفع الملف الناتج وتقارير الفحص كـ artifact باسم `gen3-bios`.
